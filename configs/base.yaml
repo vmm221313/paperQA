@@ -1,0 +1,9 @@
+data:
+  questions_file: data/questions.txt
+  contexts_dir: data/papers_txt/
+
+  join_contexts: True
+  split: True
+  split_every: 100
+
+answers_dir: exps/rag_base/

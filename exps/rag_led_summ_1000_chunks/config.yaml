@@ -1,0 +1,7 @@
+data:
+  questions_file: data/questions.txt
+  contexts_dir: data/summaries_1000_chunks_txt
+  join_contexts: false
+  split: false
+  split_every: false
+answers_dir: exps/rag_led_summ_1000_chunks/

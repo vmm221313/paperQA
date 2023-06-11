@@ -1,0 +1,9 @@
+data:
+  questions_file: data/questions.txt
+  contexts_dir: data/summaries_led_first_16384_txt
+
+  join_contexts: False
+  split: False
+  split_every: False
+
+answers_dir: exps/rag_led_summ_first_16384/
