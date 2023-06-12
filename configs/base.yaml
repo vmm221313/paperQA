@@ -1,9 +1,21 @@
 data:
   questions_file: data/questions.txt
-  contexts_dir: data/papers_txt/
+  contexts_dir: data/summaries_pegasus_pubmed_4096_chunks_txt/
 
-  join_contexts: True
+  join_contexts: False
   split: True
-  split_every: 100
+  split_every: 32
 
-answers_dir: exps/rag_base/
+model:
+  # question_encoder  
+  question_encoder_config: "facebook/dpr-question_encoder-single-nq-base"
+
+  # retriever
+  num_retrieved: 100
+  context_encoder_config: "facebook/dpr-ctx_encoder-single-nq-base"
+  
+  # generator
+  generator_config: "google/flan-t5-large"
+
+artifact_path: exps/v1.18/
+  

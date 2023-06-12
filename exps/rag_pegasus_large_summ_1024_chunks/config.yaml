@@ -1,0 +1,7 @@
+data:
+  questions_file: data/questions.txt
+  contexts_dir: data/summaries_pegasus_1024_chunks_txt/
+  join_contexts: false
+  split: false
+  split_every: false
+answers_dir: exps/rag_pegasus_large_summ_1024_chunks/

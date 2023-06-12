@@ -1,0 +1,8 @@
+data:
+  questions_file: data/questions.txt
+  contexts_dir: data/summaries_pegasus_pubmed_4096_chunks_txt/
+  join_contexts: false
+  split: true
+  split_every: 32
+  num_retrieved: 100
+answers_dir: exps/rag_bigbird_pubmed_summ_4096_chunks/

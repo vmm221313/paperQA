@@ -1,0 +1,12 @@
+data:
+  questions_file: data/questions.txt
+  contexts_dir: data/papers_txt/
+  join_contexts: false
+  split: true
+  split_every: 64
+model:
+  question_encoder_config: facebook/dpr-question_encoder-single-nq-base
+  num_retrieved: 5
+  context_encoder_config: facebook/dpr-ctx_encoder-single-nq-base
+  generator_config: google/flan-t5-large
+artifact_path: exps/v1.9/

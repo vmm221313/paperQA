@@ -1,0 +1,12 @@
+data:
+  questions_file: data/questions.txt
+  contexts_dir: data/summaries_1000_chunks_txt/
+  join_contexts: false
+  split: true
+  split_every: 128
+model:
+  question_encoder_config: facebook/dpr-question_encoder-single-nq-base
+  num_retrieved: 100
+  context_encoder_config: facebook/dpr-ctx_encoder-single-nq-base
+  generator_config: google/flan-t5-large
+artifact_path: exps/v1.13/

@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import json
 import glob
 import argparse
@@ -25,12 +26,18 @@ from datasets import (
 from transformers import (
     DPRContextEncoder,
     DPRContextEncoderTokenizerFast,
+    DPRQuestionEncoder,
     DPRQuestionEncoderTokenizerFast,
+    RagConfig,
     RagRetriever,
     RagTokenForGeneration,
     RagSequenceForGeneration,
     RagTokenizer,
+    AutoTokenizer, 
+    AutoModelForSeq2SeqLM
 )
+
+from index import CustomHFIndex
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -87,10 +94,10 @@ def join_contexts(titles, texts):
     return titles, texts
 
 
-def embed(documents: dict, ctx_encoder: DPRContextEncoder, ctx_tokenizer: DPRContextEncoderTokenizerFast) -> dict:
+def embed(documents: dict, context_encoder: DPRContextEncoder, context_tokenizer: DPRContextEncoderTokenizerFast) -> dict:
     """Compute the DPR embeddings of document passages"""
-    input_ids = ctx_tokenizer(documents["title"], documents["text"], truncation=True, padding="longest", return_tensors="pt", is_split_into_words=True, max_length=128)["input_ids"]
-    embeddings = ctx_encoder(input_ids.to(device=device), return_dict=True).pooler_output
+    input_ids = context_tokenizer(documents["title"], documents["text"], truncation=True, padding="longest", return_tensors="pt", is_split_into_words=True, max_length=128)["input_ids"]
+    embeddings = context_encoder(input_ids.to(device=device), return_dict=True).pooler_output
 
     return {"embeddings": embeddings.detach().cpu().numpy()}
 
@@ -118,13 +125,13 @@ def main(args):
         )
         print(dataset)
 
-    ctx_encoder = DPRContextEncoder.from_pretrained("facebook/dpr-ctx_encoder-single-nq-base").to(device=device)
-    ctx_tokenizer = DPRContextEncoderTokenizerFast.from_pretrained("facebook/dpr-ctx_encoder-single-nq-base")
+    context_tokenizer = DPRContextEncoderTokenizerFast.from_pretrained(args.model.context_encoder_config)
+    context_encoder = DPRContextEncoder.from_pretrained(args.model.context_encoder_config).to(device=device)
 
     # compute the embeddings
     new_features = Features({"text": Value("string"), "title": Value("string"), "embeddings": Sequence(Value("float32"))})
     dataset = dataset.map(
-        partial(embed, ctx_encoder=ctx_encoder, ctx_tokenizer=ctx_tokenizer),
+        partial(embed, context_encoder=context_encoder, context_tokenizer=context_tokenizer),
         batched=True,
         batch_size=1,
         features=new_features,
@@ -134,23 +141,50 @@ def main(args):
     print(dataset)
     print(dataset.get_index("embeddings"))
 
-    tokenizer = RagTokenizer.from_pretrained("facebook/rag-token-nq")
-    retriever = RagRetriever.from_pretrained("facebook/rag-token-nq", index_name="custom", indexed_dataset=dataset)
-    model = RagSequenceForGeneration.from_pretrained("facebook/rag-token-nq", retriever=retriever).to(device)
+    generator_tokenizer = AutoTokenizer.from_pretrained(args.model.generator_config)
+    generator = AutoModelForSeq2SeqLM.from_pretrained(args.model.generator_config).to(device).half()
+    
+    question_encoder = DPRQuestionEncoder.from_pretrained(args.model.question_encoder_config) 
+    question_encoder_tokenizer = DPRQuestionEncoderTokenizerFast.from_pretrained(args.model.question_encoder_config)
+    
+    index_HF = CustomHFIndex(vector_size=768, dataset=dataset)
+    retriever = RagRetriever(
+                            config=RagConfig.from_pretrained("facebook/rag-token-nq"), 
+                            question_encoder_tokenizer=question_encoder_tokenizer,
+                            generator_tokenizer=generator_tokenizer,
+                            index=index_HF)
+    
+    model = RagSequenceForGeneration(question_encoder=question_encoder, retriever=retriever, generator=generator).to(device)
     
     answers = []
     for question in questions:
         print(f"question: {question}")
-        generated = model.generate(tokenizer.question_encoder(question, return_tensors="pt")["input_ids"].to(device))
-        generated_string = tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
+
+        # encode question
+        question_tokenized = question_encoder_tokenizer(question, return_tensors="pt")
+        question_input_ids = question_tokenized["input_ids"].to(device)
+        question_attention_mask = question_tokenized["attention_mask"].to(device)
+        question_hidden_states = question_encoder(input_ids=question_input_ids, attention_mask=question_attention_mask).pooler_output
+
+        # retrieve relevant contexts
+        contexts_dict = retriever(
+                                question_input_ids=question_input_ids.detach().cpu().numpy(), 
+                                question_hidden_states=question_hidden_states.detach().cpu().numpy(), 
+                                n_docs=args.model.num_retrieved,
+                                return_tensors="pt")
+
+        # generate free-form answer
+        generated = model.generate(input_ids=question_input_ids, attention_mask=question_attention_mask, context_input_ids=contexts_dict["context_input_ids"].to(device), context_attention_mask=contexts_dict["context_attention_mask"].to(device))
+        generated_string = generator_tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
+
         answers.append(generated_string)
         print(f"answer: {generated_string}") 
         print()
     
-    if (args.answers_dir is not None):
-        save_answers(args.answers_dir, answers)
-        OmegaConf.save(args, f"{args.answers_dir}/config.yaml")
-
+    if (args.artifact_path is not None):
+        save_answers(args.artifact_path, answers)
+        OmegaConf.save(args, f"{args.artifact_path}/config.yaml")
+        
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
