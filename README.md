@@ -27,17 +27,72 @@ text = " ".join(text)
 text = re.sub("\n", "", text)       
 ```
 
+
 ## Approach
 
 We use the [Retrieval Augmented Generation](https://arxiv.org/pdf/2005.11401.pdf) paradigm for this task. Given a question, a fixed number of relevant contexts are retrieved from the PDFs using the [Dense Passage Retriever](https://arxiv.org/pdf/2004.04906.pdf). These are then concatenated with the question and fed to a generative language model to generate a free-form (aka abstractive) answer for the given question via the text-to-text generation paradigm. 
 
 
-
-
-
 # Experiments
 
 ## Baseline
+
+For the baseline, we use apply RAG model with a [DPR](https://arxiv.org/pdf/2004.04906.pdf) retriever and a [Flan-T5](https://huggingface.co/docs/transformers/model_doc/flan-t5) text-to-text generative model. The following code snippet outlines the basic approach. For the complete pipeline refer to rag_pipeline.py. 
+```
+# initialize context encoder
+context_tokenizer = DPRContextEncoderTokenizerFast.from_pretrained(args.model.context_encoder_config)
+context_encoder = DPRContextEncoder.from_pretrained(args.model.context_encoder_config).to(device=device)
+
+# initialize question encoder
+question_encoder = DPRQuestionEncoder.from_pretrained(args.model.question_encoder_config) 
+question_encoder_tokenizer = DPRQuestionEncoderTokenizerFast.from_pretrained(args.model.question_encoder_config)
+
+# compute the context embeddings
+new_features = Features({"text": Value("string"), "title": Value("string"), "embeddings": Sequence(Value("float32"))})
+dataset = dataset.map(
+    partial(embed, context_encoder=context_encoder, context_tokenizer=context_tokenizer),
+    batched=True,
+    batch_size=1,
+    features=new_features,
+)
+index = faiss.IndexHNSWFlat(768, 128, faiss.METRIC_INNER_PRODUCT)
+index_HF = CustomHFIndex(vector_size=768, dataset=dataset)
+dataset.add_faiss_index("embeddings", custom_index=index)
+
+# initialize generator
+generator_tokenizer = AutoTokenizer.from_pretrained(args.model.generator_config)
+generator = AutoModelForSeq2SeqLM.from_pretrained(args.model.generator_config).to(device).half()
+
+# initialize retriever
+retriever = RagRetriever(
+                        config=RagConfig.from_pretrained("facebook/rag-token-nq"), 
+                        question_encoder_tokenizer=question_encoder_tokenizer,
+                        generator_tokenizer=generator_tokenizer,
+                        index=index_HF)
+
+# combine question_encoder, retriever, and generator into one single model
+model = RagSequenceForGeneration(question_encoder=question_encoder, retriever=retriever, generator=generator).to(device)
+
+# encode question
+print(f"question: {question}")
+question_tokenized = question_encoder_tokenizer(question, return_tensors="pt")
+question_input_ids = question_tokenized["input_ids"].to(device)
+question_attention_mask = question_tokenized["attention_mask"].to(device)
+question_hidden_states = question_encoder(input_ids=question_input_ids, attention_mask=question_attention_mask).pooler_output
+
+# retrieve relevant contexts
+contexts_dict = retriever(
+                        question_input_ids=question_input_ids.detach().cpu().numpy(), 
+                        question_hidden_states=question_hidden_states.detach().cpu().numpy(), 
+                        n_docs=args.model.num_retrieved,
+                        return_tensors="pt")
+
+# generate free-form answer
+generated = model.generate(input_ids=question_input_ids, attention_mask=question_attention_mask, context_input_ids=contexts_dict["context_input_ids"].to(device), context_attention_mask=contexts_dict["context_attention_mask"].to(device))
+generated_string = generator_tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
+print(f"answer: {generated_string}") 
+```
+
 
 |      	| contexts       	| join  	| split_every 	| retriever 	| num_retrieved 	| generator     	| When did the GARDASIL 9 recommendations change? 	| What were the past 3 recommendation changes for GARDASIL 9? 	| Is GARDASIL 9 recommended for Adults? 	| Does the ACIP recommend one dose GARDASIL 9? 	|
 |------	|----------------	|-------	|-------------	|-----------	|---------------	|---------------	|-------------------------------------------------	|-------------------------------------------------------------	|---------------------------------------	|----------------------------------------------	|
@@ -46,10 +101,12 @@ We use the [Retrieval Augmented Generation](https://arxiv.org/pdf/2005.11401.pdf
 |      	|                	|       	|             	|           	|               	|               	|                                                 	|                                                             	|                                       	|                                              	|
 
 
+It can be observed that the performance is reasonably good even without any fine-tuning or augmentation, with reasonable answers to three out of the four questions. 
+
 
 ## Concat + Chunks
 
-
+In this experiment, we apply two modifications: 1) concatenate all the contexts together, and 2) split the combined context into chunks of a fixed number of tokens. This simple trick has been shown to improve retrieval performance by allowing DPR to select smaller, more fine-grained contexts from the entire database. 
 
 |      	| contexts       	| join  	| split_every 	| retriever 	| num_retrieved 	| generator     	| When did the GARDASIL 9 recommendations change? 	| What were the past 3 recommendation changes for GARDASIL 9? 	| Is GARDASIL 9 recommended for Adults?         	| Does the ACIP recommend one dose GARDASIL 9?             	|
 |------	|----------------	|-------	|-------------	|-----------	|---------------	|---------------	|-------------------------------------------------	|-------------------------------------------------------------	|-----------------------------------------------	|----------------------------------------------------------	|
@@ -64,25 +121,18 @@ We use the [Retrieval Augmented Generation](https://arxiv.org/pdf/2005.11401.pdf
 
 
 ## Increasing the number of retrieved contexts  
-
-
+In this experiment we try increasing the number of contexts retrieved by the DPR retriever. Interestingly, it can be observed that there's no performance improvement on increasing the number of retrieved contexts. We verified that this wasn't due to a bug by checking the retrieved contexts. It turns out that this is because the answer is mostly in the first retrieved context (i.e. most similar context) itself. This indicates that the DPR retriever is able to retrieve very relevant contexts most of the time. 
 
 |       	| contexts       	| join  	| split_every 	| retriever 	| num_retrieved 	| generator     	| When did the GARDASIL 9 recommendations change? 	| What were the past 3 recommendation changes for GARDASIL 9? 	| Is GARDASIL 9 recommended for Adults?         	| Does the ACIP recommend one dose GARDASIL 9? 	|
 |-------	|----------------	|-------	|-------------	|-----------	|---------------	|---------------	|-------------------------------------------------	|-------------------------------------------------------------	|-----------------------------------------------	|----------------------------------------------	|
-| v1.12 	| raw paper text 	| FALSE 	| 32          	| DPR       	| 1             	| Flan-T5 Large 	| February 2015                                   	| Recommendations were approved by ACIP in February 2015.     	| no                                            	| yes                                          	|
-| v1.6  	| raw paper text 	| FALSE 	| 32          	| DPR       	| 5             	| Flan-T5 Large 	| February 2015                                   	| Recommendations were approved by ACIP in February 2015.     	| no                                            	| yes                                          	|
-| v1.0  	| raw paper text 	| FALSE 	| 32          	| DPR       	| 10            	| Flan-T5 Large 	| February 2015                                   	| Recommendations were approved by ACIP in February 2015.     	| no                                            	| yes                                          	|
-| v1.7  	| raw paper text 	| FALSE 	| 32          	| DPR       	| 20            	| Flan-T5 Large 	| February 2015                                   	| Recommendations were approved by ACIP in February 2015.     	| no                                            	| yes                                          	|
-|       	|                	|       	|             	|           	|               	|               	|                                                 	|                                                             	|                                               	|                                              	|
 | v1.8  	| raw paper text 	| FALSE 	| 64          	| DPR       	| 1             	| Flan-T5 Large 	| December 10, 2014                               	| 9vHPV, 4vHPV or 2vHPV can be used for routine               	| 9vHPV, 4vHPV or 2vHPV can be used for routine 	| yes                                          	|
 | v1.9  	| raw paper text 	| FALSE 	| 64          	| DPR       	| 5             	| Flan-T5 Large 	| December 10, 2014                               	| 9vHPV, 4vHPV or 2vHPV can be used for routine               	| yes                                           	| yes                                          	|
 | v1.10 	| raw paper text 	| FALSE 	| 64          	| DPR       	| 10            	| Flan-T5 Large 	| December 10, 2014                               	| 9vHPV, 4vHPV or 2vHPV can be used for routine               	| yes                                           	| yes                                          	|
 | v1.11 	| raw paper text 	| FALSE 	| 64          	| DPR       	| 20            	| Flan-T5 Large 	| December 10, 2014                               	| 9vHPV, 4vHPV or 2vHPV can be used for routine               	| yes                                           	| yes                                          	|
 
 
-
-### Summarizing the contexts 
-
+## Summarizing the contexts 
+From the parsed papers, it can be observed that the text is very noisy. This might make it difficult for the DPR retriever to identify the relevant sections. Hence, we try to clean up the contexts by summarizing them using finetuned models like [Longformer-Encoder-Decoder](https://arxiv.org/abs/2004.05150) and [Big Bird](https://arxiv.org/abs/2007.14062), which were designed to handle long inputs. It can be observed that the performance for the second question improves slightly, with atleast one reasonable reason being generated by the model. 
 
 
 |       	| contexts                                	| join  	| split_every 	| retriever 	| num_retrieved 	| generator     	| When did the GARDASIL 9 recommendations change? 	| What were the past 3 recommendation changes for GARDASIL 9?                  	| Is GARDASIL 9 recommended for Adults?        	| Does the ACIP recommend one dose GARDASIL 9?                                 	|
@@ -92,8 +142,6 @@ We use the [Retrieval Augmented Generation](https://arxiv.org/pdf/2005.11401.pdf
 | v1.14 	| summaries with LED (first 16384 tokens) 	| FALSE 	| 64          	| DPR       	| 10            	| Flan-T5 Large 	| 2011                                            	| Use of a 2-Dose Schedule for Human Papillomavirus                            	| CDC                                          	| Advisory Committee on Immunization Practices                                 	|
 | v1.17 	| summaries Pegasus (1024 chunks)         	| FALSE 	| 64          	| DPR       	| 10            	| Flan-T5 Large 	| December 10, 2014                               	| Use of a 2-Dose Schedule for Human Papillomavirus                            	| no                                           	| FDA approved 9vHPV for use in a 2-dose series for girls and boys aged        	|
 | v1.18 	| summaries (BigBird) (4096 chunks)       	| FALSE 	| 64          	| DPR       	| 10            	| Flan-T5 Large 	| s>                                              	| cdc recommends universal vaccination for adults aged 16 years, whereas the c 	| s>                                           	| cdc recommends universal vaccination for adults aged 16 years, whereas the c 	|
-
-
 
 
 # More ideas
@@ -124,7 +172,7 @@ python summarize_led.py
 python summarize_big_bird.py 
 ```
 
-5. Finally, run the RAG pipeline by specifying the parameters in a config file as follows: 
+5. Finally, run the RAG pipeline by specifying the parameters in a config file (.yaml) as follows: 
 ```
 python rag_pipeline.py --config configs/base.yaml
 ```
